@@ -1,8 +1,7 @@
 # Read Qlik Sense .qvd files 🛠
-[![CI pipeline](https://github.com/SBentley/qvd-utils/actions/workflows/CI.yml/badge.svg)](https://github.com/SBentley/qvd-utils/actions/workflows/CI.yml)
+This is a fork of the python library to read qvd's in python but modified to be used as a rust lib.
 
-A python library for reading Qlik Sense .qvd file format, written in Rust.
-Files can be read to DataFrame or dictionary.
+Original repo: https://github.com/SBentley/qvd-utils
 
 ## Install
 
