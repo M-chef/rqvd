@@ -175,44 +175,22 @@ fn get_symbols_as_strings(buf: &[u8], field: &QvdFieldHeader) -> Vec<String> {
 
 // Retrieve bit stuffed data. Each row has index to value from symbol map.
 fn get_row_indexes(buf: &[u8], field: &QvdFieldHeader, record_byte_size: usize) -> Vec<i64> {
-    // let mut cloned_buf = buf.to_owned();
-    let chunks = buf.chunks(record_byte_size);
-    let mut indexes: Vec<i64> = Vec::new();
-    for chunk in chunks {
-        // Reverse the bytes in the record
+    let mut indexes: Vec<i64> = Vec::with_capacity(buf.len() / record_byte_size);
+    for chunk in buf.chunks(record_byte_size) {
         let mut chunk = chunk.to_vec();
         chunk.reverse();
+
         let bits = BitSlice::<Msb0, _>::from_slice(&chunk).unwrap();
         let start = bits.len() - field.bit_offset;
         let end = bits.len() - field.bit_offset - field.bit_width;
-        let binary = bitslice_to_vec(&bits[end..start]);
-        let index = binary_to_u32(binary);
-        indexes.push((index as i32 + field.bias) as i64);
+        let index = bitslice_to_u32(&bits[end..start]);
+        indexes.push(index  + field.bias as i64);
     }
     indexes
 }
 
-// Slow
-fn binary_to_u32(binary: Vec<u8>) -> u32 {
-    let mut sum: u32 = 0;
-    for bit in binary {
-        sum <<= 1;
-        sum += bit as u32;
-    }
-    sum
-}
-
-// Slow
-fn bitslice_to_vec(bitslice: &BitSlice<Msb0, u8>) -> Vec<u8> {
-    let mut v: Vec<u8> = Vec::new();
-    for bit in bitslice {
-        let val = match bit {
-            true => 1,
-            false => 0,
-        };
-        v.push(val);
-    }
-    v
+fn bitslice_to_u32(slice: &BitSlice::<Msb0, u8>) -> i64 {
+    slice.iter().fold(0, |acc, &bit| (acc << 1) | bit as i64)
 }
 
 fn get_xml_data(reader: &mut BufReader<File>) -> Result<String, io::Error> {
@@ -362,23 +340,6 @@ mod tests {
             "double".into(),
         ];
         assert_eq!(expected, res);
-    }
-
-    #[test]
-    fn test_bitslice_to_vec() {
-        let mut x: Vec<u8> = vec![
-            0x00, 0x00, 0x00, 0x11, 0x01, 0x22, 0x02, 0x33, 0x13, 0x34, 0x14, 0x35,
-        ];
-        let bits = BitSlice::<Msb0, _>::from_slice(&mut x[..]).unwrap();
-        let target = &bits[27..32];
-        let binary_vec = bitslice_to_vec(&target);
-
-        let mut sum: u32 = 0;
-        for bit in binary_vec {
-            sum <<= 1;
-            sum += bit as u32;
-        }
-        assert_eq!(17, sum);
     }
 
     #[test]
