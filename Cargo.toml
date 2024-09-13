@@ -1,26 +1,22 @@
 [package]
 name = "qvd"
-version = "0.0.15"
-authors = ["Sam Bentley <samtbentley@gmail.com>"]
-edition = "2018"
+version = "0.0.1"
+authors = ["Matthias Scheffelmeier <matthias.scheffelmeier@continental.com>"]
+edition = "2021"
 readme = "README.md"
 description = "A library for reading Qlik Sense .qvd file format from Python, written in Rust."
 license = "Apache-2.0"
-repository = "https://github.com/SBentley/qvd-utils"
+repository = "https://github.geo.conti.de/uia54745/qvd_utils"
 keywords = ["python", "rust", "qlik", "sense", "qvd"]
 
 
 [lib]
-name = "qvd"
-crate-type = ["cdylib"]
+name = "rqvd"
+crate-type = ["lib"]
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
 serde = { version = "1.0.117", features = ["derive"] }
 quick-xml = { version = "0.20.0", features = ["serialize"]}
 bitvec = "0.19.4"
-
-[dependencies.pyo3]
-version = "0.12.3"
-features = ["extension-module"]
 

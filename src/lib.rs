@@ -1,8 +1,8 @@
 use bitvec::prelude::*;
-use pyo3::wrap_pyfunction;
-use pyo3::{prelude::*, types::PyDict};
 use quick_xml::de::from_str;
 use qvd_structure::{QvdFieldHeader, QvdTableHeader};
+use std::collections::BTreeMap;
+use std::fmt::Display;
 use std::io::SeekFrom;
 use std::io::{self, Read};
 use std::path::Path;
@@ -11,42 +11,73 @@ use std::{collections::HashMap, fs::File};
 use std::{convert::TryInto, io::prelude::*};
 pub mod qvd_structure;
 
-#[pymodule]
-fn qvd(_py: Python, m: &PyModule) -> PyResult<()> {
-    m.add_function(wrap_pyfunction!(read_qvd, m)?)?;
+type Row = BTreeMap<Header, CellValue>;
 
-    Ok(())
+#[derive(Debug, PartialEq, Eq, Hash, Clone, PartialOrd, Ord)]
+struct Header(String);
+
+#[derive(Debug, PartialEq, Clone)]
+enum CellValue {
+    Text(String),
+    Int(i32),
+    Float(f32),
+    Null,
 }
 
-#[pyfunction]
-fn read_qvd(py: Python, file_name: String) -> PyResult<Py<PyDict>> {
-    let xml: String = get_xml_data(&file_name).expect("Error reading file");
-    let dict = PyDict::new(py);
+impl Display for CellValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            CellValue::Text(s) => s,
+            CellValue::Int(i) => &i.to_string(),
+            CellValue::Float(f) => &f.to_string(),
+            CellValue::Null => &String::new(),
+        };
+        write!(f, "{s}")
+    }
+}
+
+
+fn read_qvd(file_name: impl AsRef<Path>) -> Vec<Row> {
+    let xml: String = get_xml_data(file_name.as_ref()).expect("Error reading file");
     let binary_section_offset = xml.as_bytes().len();
+    // let mut final_map = HashMap::new();
 
     let qvd_structure: QvdTableHeader = from_str(&xml).unwrap();
-    let mut symbol_map: HashMap<String, Vec<Option<String>>> = HashMap::new();
+    let rows_start = qvd_structure.offset;
+    
 
-    if let Ok(f) = File::open(&file_name) {
+    let mut rows = Vec::new();
+
+    let file = File::open(&file_name).unwrap();
         // Seek to the end of the XML section
-        let buf = read_qvd_to_buf(f, binary_section_offset);
-        let rows_start = qvd_structure.offset;
-        let rows_end = buf.len();
-        let rows_section = &buf[rows_start..rows_end];
-        let record_byte_size = qvd_structure.record_byte_size;
+    let buf = read_qvd_to_buf(file, binary_section_offset);
+    let rows_end = buf.len();
+    let rows_section = &buf[rows_start..rows_end];
+    let record_byte_size = qvd_structure.record_byte_size;
 
-        for field in qvd_structure.fields.headers {
-            symbol_map.insert(
-                field.field_name.clone(),
-                get_symbols_as_strings(&buf, &field),
-            );
-            let symbol_indexes = get_row_indexes(&rows_section, &field, record_byte_size);
-            let column_values =
-                match_symbols_with_indexes(&symbol_map[&field.field_name], &symbol_indexes);
-            dict.set_item(field.field_name, column_values).unwrap();
+    let data: HashMap<Header, Vec<Option<String>>> = qvd_structure.fields.headers.iter().map(|field| {
+        let symbols = get_symbols_as_strings(&buf, field);
+        let symbol_indexes = get_row_indexes(rows_section, field, record_byte_size);
+        let values = match_symbols_with_indexes(&symbols, &symbol_indexes);
+        (Header(field.field_name.clone()), values)
+    }).collect();
+
+    for idx in 0..qvd_structure.no_of_records as usize {
+        let mut row = Row::new();
+        for key in data.keys() {
+            let cell_data = data.get(key).unwrap().get(idx).unwrap().clone();
+            let cell = match cell_data {
+                Some(s) => CellValue::Text(s),
+                None => CellValue::Null,
+            };
+            row.insert(key.clone(), cell);
         }
+        rows.push(row);
     }
-    Ok(dict.into())
+
+    rows
+
+
 }
 
 fn read_qvd_to_buf(mut f: File, binary_section_offset: usize) -> Vec<u8> {
@@ -57,23 +88,23 @@ fn read_qvd_to_buf(mut f: File, binary_section_offset: usize) -> Vec<u8> {
     buf
 }
 
-fn match_symbols_with_indexes(symbols: &[Option<String>], pointers: &[i64]) -> Vec<Option<String>> {
+fn match_symbols_with_indexes(symbols: &[String], pointers: &[i64]) -> Vec<Option<String>> {
     let mut cols: Vec<Option<String>> = Vec::new();
     for pointer in pointers.iter() {
         if symbols.is_empty() || *pointer < 0 {
             cols.push(None);
         } else {
-            cols.push(symbols[*pointer as usize].clone());
+            cols.push(Some(symbols[*pointer as usize].clone()));
         }
     }
     cols
 }
 
-fn get_symbols_as_strings(buf: &[u8], field: &QvdFieldHeader) -> Vec<Option<String>> {
+fn get_symbols_as_strings(buf: &[u8], field: &QvdFieldHeader) -> Vec<String> {
     let start = field.offset;
     let end = start + field.length;
     let mut string_start: usize = 0;
-    let mut strings: Vec<Option<String>> = Vec::new();
+    let mut strings: Vec<String> = Vec::new();
 
     let mut i = start;
     while i < end {
@@ -90,7 +121,7 @@ fn get_symbols_as_strings(buf: &[u8], field: &QvdFieldHeader) -> Vec<Option<Stri
                     field.field_name, start, i
                 )
                 });
-                strings.push(Some(value));
+                strings.push(value);
                 i += 1;
             }
             1 => {
@@ -98,7 +129,7 @@ fn get_symbols_as_strings(buf: &[u8], field: &QvdFieldHeader) -> Vec<Option<Stri
                 let target_bytes = buf[i + 1..i + 5].to_vec();
                 let byte_array: [u8; 4] = target_bytes.try_into().unwrap();
                 let numeric_value = i32::from_le_bytes(byte_array);
-                strings.push(Some(numeric_value.to_string()));
+                strings.push(numeric_value.to_string());
                 i += 5;
             }
             2 => {
@@ -106,7 +137,7 @@ fn get_symbols_as_strings(buf: &[u8], field: &QvdFieldHeader) -> Vec<Option<Stri
                 let target_bytes = buf[i + 1..i + 9].to_vec();
                 let byte_array: [u8; 8] = target_bytes.try_into().unwrap();
                 let numeric_value = f64::from_le_bytes(byte_array);
-                strings.push(Some(numeric_value.to_string()));
+                strings.push(numeric_value.to_string());
                 i += 9;
             }
             4 => {
@@ -144,7 +175,7 @@ fn get_row_indexes(buf: &[u8], field: &QvdFieldHeader, record_byte_size: usize) 
     for chunk in chunks {
         // Reverse the bytes in the record
         chunk.reverse();
-        let bits = BitSlice::<Msb0, _>::from_slice(&chunk[..]).unwrap();
+        let bits = BitSlice::<Msb0, _>::from_slice(chunk).unwrap();
         let start = bits.len() - field.bit_offset;
         let end = bits.len() - field.bit_offset - field.bit_width;
         let binary = bitslice_to_vec(&bits[end..start]);
@@ -177,7 +208,7 @@ fn bitslice_to_vec(bitslice: &BitSlice<Msb0, u8>) -> Vec<u8> {
     v
 }
 
-fn get_xml_data(file_name: &str) -> Result<String, io::Error> {
+fn get_xml_data(file_name: impl AsRef<Path>) -> Result<String, io::Error> {
     match read_file(file_name) {
         Ok(mut reader) => {
             let mut buffer = Vec::new();
@@ -204,6 +235,8 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::{fs::OpenOptions, time::Instant};
+
     use super::*;
 
     #[test]
@@ -221,7 +254,7 @@ mod tests {
             bit_width: 0,
         };
         let res = get_symbols_as_strings(&buf, &field);
-        let expected: Vec<Option<String>> = vec![Some(420.0.to_string()), Some(421.0.to_string())];
+        let expected = vec![420.0.to_string(), 421.0.to_string()];
         assert_eq!(expected, res);
     }
 
@@ -237,7 +270,7 @@ mod tests {
             bit_width: 0,
         };
         let res = get_symbols_as_strings(&buf, &field);
-        let expected = vec![Some(10.0.to_string()), Some(20.0.to_string())];
+        let expected = vec![10.0.to_string(), 20.0.to_string()];
         assert_eq!(expected, res);
     }
 
@@ -261,13 +294,13 @@ mod tests {
             bit_width: 0,
         };
         let res = get_symbols_as_strings(&buf, &field);
-        let expected: Vec<Option<String>> = vec![
-            Some(420.to_string()),
-            Some(421.to_string()),
-            Some(1.to_string()),
-            Some(2.to_string()),
-            Some(7000.to_string()),
-            Some(865.2.to_string())
+        let expected: Vec<String> = vec![
+            420.to_string(),
+            421.to_string(),
+            1.to_string(),
+            2.to_string(),
+            7000.to_string(),
+            865.2.to_string()
         ];
         assert_eq!(expected, res);
     }
@@ -287,7 +320,7 @@ mod tests {
             bit_width: 0,
         };
         let res = get_symbols_as_strings(&buf, &field);
-        let expected = vec![Some("example text".into()), Some("rust".into())];
+        let expected: Vec<String> = vec!["example text".into(), "rust".into()];
         assert_eq!(expected, res);
     }
 
@@ -309,7 +342,7 @@ mod tests {
             bit_width: 0,
         };
         let res = get_symbols_as_strings(&buf, &field);
-        let expected = vec![Some("也有中文简体字".into()), Some("🐍🦀".into())];
+        let expected: Vec<String> = vec!["也有中文简体字".into(), "🐍🦀".into()];
         assert_eq!(expected, res);
     }
 
@@ -329,11 +362,11 @@ mod tests {
             bit_width: 0,
         };
         let res = get_symbols_as_strings(&buf, &field);
-        let expected = vec![
-            Some("example text".into()),
-            Some("rust".into()),
-            Some("1234".into()),
-            Some("double".into()),
+        let expected: Vec<String> = vec![
+            "example text".into(),
+            "rust".into(),
+            "1234".into(),
+            "double".into(),
         ];
         assert_eq!(expected, res);
     }
@@ -372,5 +405,70 @@ mod tests {
         let res = get_row_indexes(&buf, &field, record_byte_size);
         let expected: Vec<i64> = vec![5];
         assert_eq!(expected, res);
+    }
+
+    #[test]
+    fn read_test_file_qvd_null() {
+        let result = read_qvd("tests/test_qvd_null.qvd");
+
+        let some_null = [
+            CellValue::Text(1.2.to_string()), 
+            CellValue::Text(format!("{:.1}", 10.0)), 
+            CellValue::Text(64.to_string()),
+            CellValue::Null,
+            CellValue::Null,
+            CellValue::Null,
+            CellValue::Text(1.to_string()),
+            CellValue::Text(213.95625.to_string()),
+            CellValue::Text(2.to_string()),
+            CellValue::Text(3.to_string()),
+            CellValue::Text(5.to_string()),
+            CellValue::Text(1000.to_string()),
+        ];
+
+        let mut expected = Vec::new();
+        for i in 1..=12 {
+            let mut map = BTreeMap::new();
+            map.insert(Header("Quarter".into()), CellValue::Text(format!("Q{}", (i - 1) / 3 + 1)));
+            map.insert(Header("Month".into()), CellValue::Text(i.to_string()));
+            map.insert(Header("some_null".into()), some_null[i - 1].clone());
+            map.insert(Header("all Null".into()), CellValue::Null);
+            expected.push(map);
+        }
+        
+        assert_eq!(expected, result);
+    }
+
+    #[test]
+    #[ignore = "manual test"]
+    fn read_test_file() {
+        let now = Instant::now();
+        let result = read_qvd("test/big_file.qvd");
+        let duration = Instant::now().checked_duration_since(now).unwrap();
+        println!("Duration reading: {duration:?}");
+
+        assert_eq!(result.len(), 20526);
+        let mut file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open("output.csv")
+            .unwrap();
+        
+        let header = result.first().unwrap().keys().map(|k| k.0.as_str())
+            .collect::<Vec<&str>>()
+            .join(",");
+        file.write_all(header.as_bytes()).unwrap();
+            
+        for row in result {
+            let mut content = row.into_iter().map(|(key, values)| {
+                values.to_string()
+            })
+                .collect::<Vec<String>>()
+                .join(",");
+            content.push('\n');
+            file.write_all(content.as_bytes()).unwrap();
+        }
+        
     }
 }
