@@ -2,8 +2,9 @@ use bitvec::prelude::*;
 use quick_xml::de::from_str;
 use qvd_structure::{QvdFieldHeader, QvdTableHeader};
 use std::collections::BTreeMap;
+use std::error::Error;
 use std::fmt::Display;
-use std::io::SeekFrom;
+use std::io::{BufReader, SeekFrom};
 use std::io::{self, Read};
 use std::path::Path;
 use std::str;
@@ -36,28 +37,41 @@ impl Display for CellValue {
     }
 }
 
+#[derive(Debug)]
+pub struct QvdError {
+    kind: QvdErrorKind,
+    message: String,
+}
 
-fn read_qvd(file_name: impl AsRef<Path>) -> Vec<Row> {
-    let xml: String = get_xml_data(file_name.as_ref()).expect("Error reading file");
-    let binary_section_offset = xml.as_bytes().len();
-    // let mut final_map = HashMap::new();
+#[derive(Debug)]
+pub enum QvdErrorKind {
+    ReadFile
+}
 
+impl From<io::Error> for QvdError {
+    fn from(value: io::Error) -> Self {
+        QvdError { kind: QvdErrorKind::ReadFile, message: value.to_string() }
+    }
+}
+
+
+fn read_qvd(file_name: impl AsRef<Path>) -> Result<Vec<Row>, QvdError> {
+    let file = File::open(&file_name)?;
+    let mut reader = BufReader::new(file);
+    let xml: String = get_xml_data(&mut reader)?;
     let qvd_structure: QvdTableHeader = from_str(&xml).unwrap();
     let rows_start = qvd_structure.offset;
     
+    let mut buf_new = Vec::new();
+    reader.read_to_end(&mut buf_new).unwrap();
+    let row_section_new = &buf_new[rows_start..buf_new.len()];
+    let record_byte_size = qvd_structure.record_byte_size;
 
     let mut rows = Vec::new();
 
-    let file = File::open(&file_name).unwrap();
-        // Seek to the end of the XML section
-    let buf = read_qvd_to_buf(file, binary_section_offset);
-    let rows_end = buf.len();
-    let rows_section = &buf[rows_start..rows_end];
-    let record_byte_size = qvd_structure.record_byte_size;
-
     let data: HashMap<Header, Vec<Option<String>>> = qvd_structure.fields.headers.iter().map(|field| {
-        let symbols = get_symbols_as_strings(&buf, field);
-        let symbol_indexes = get_row_indexes(rows_section, field, record_byte_size);
+        let symbols = get_symbols_as_strings(&buf_new, field);
+        let symbol_indexes = get_row_indexes(row_section_new, field, record_byte_size);
         let values = match_symbols_with_indexes(&symbols, &symbol_indexes);
         (Header(field.field_name.clone()), values)
     }).collect();
@@ -75,17 +89,9 @@ fn read_qvd(file_name: impl AsRef<Path>) -> Vec<Row> {
         rows.push(row);
     }
 
-    rows
+    Ok(rows)
 
 
-}
-
-fn read_qvd_to_buf(mut f: File, binary_section_offset: usize) -> Vec<u8> {
-    f.seek(SeekFrom::Start(binary_section_offset as u64))
-        .unwrap();
-    let mut buf: Vec<u8> = Vec::new();
-    f.read_to_end(&mut buf).unwrap();
-    buf
 }
 
 fn match_symbols_with_indexes(symbols: &[String], pointers: &[i64]) -> Vec<Option<String>> {
@@ -169,13 +175,14 @@ fn get_symbols_as_strings(buf: &[u8], field: &QvdFieldHeader) -> Vec<String> {
 
 // Retrieve bit stuffed data. Each row has index to value from symbol map.
 fn get_row_indexes(buf: &[u8], field: &QvdFieldHeader, record_byte_size: usize) -> Vec<i64> {
-    let mut cloned_buf = buf.to_owned();
-    let chunks = cloned_buf.chunks_mut(record_byte_size);
+    // let mut cloned_buf = buf.to_owned();
+    let chunks = buf.chunks(record_byte_size);
     let mut indexes: Vec<i64> = Vec::new();
     for chunk in chunks {
         // Reverse the bytes in the record
+        let mut chunk = chunk.to_vec();
         chunk.reverse();
-        let bits = BitSlice::<Msb0, _>::from_slice(chunk).unwrap();
+        let bits = BitSlice::<Msb0, _>::from_slice(&chunk).unwrap();
         let start = bits.len() - field.bit_offset;
         let end = bits.len() - field.bit_offset - field.bit_width;
         let binary = bitslice_to_vec(&bits[end..start]);
@@ -208,29 +215,15 @@ fn bitslice_to_vec(bitslice: &BitSlice<Msb0, u8>) -> Vec<u8> {
     v
 }
 
-fn get_xml_data(file_name: impl AsRef<Path>) -> Result<String, io::Error> {
-    match read_file(file_name) {
-        Ok(mut reader) => {
-            let mut buffer = Vec::new();
-            // There is a line break, carriage return and a null terminator between the XMl and data
-            // Find the null terminator
-            reader
-                .read_until(0, &mut buffer)
-                .expect("Failed to read file");
-            let xml_string =
-                str::from_utf8(&buffer[..]).expect("xml section contains invalid UTF-8 chars");
-            Ok(xml_string.to_owned())
-        }
-        Err(e) => Err(e),
-    }
-}
-
-fn read_file<P>(filename: P) -> io::Result<io::BufReader<File>>
-where
-    P: AsRef<Path>,
-{
-    let file = File::open(filename)?;
-    Ok(io::BufReader::new(file))
+fn get_xml_data(reader: &mut BufReader<File>) -> Result<String, io::Error> {
+    let mut buffer = Vec::new();
+    // There is a line break, carriage return and a null terminator between the XMl and data
+    // Find the null terminator
+    reader.read_until(0, &mut buffer)
+        .expect("Failed to read file");
+    let xml_string =
+        String::from_utf8(buffer).expect("xml section contains invalid UTF-8 chars");
+    Ok(xml_string)
 }
 
 #[cfg(test)]
@@ -409,7 +402,7 @@ mod tests {
 
     #[test]
     fn read_test_file_qvd_null() {
-        let result = read_qvd("tests/test_qvd_null.qvd");
+        let result = read_qvd("tests/test_qvd_null.qvd").unwrap();
 
         let some_null = [
             CellValue::Text(1.2.to_string()), 
@@ -443,7 +436,7 @@ mod tests {
     #[ignore = "manual test"]
     fn read_test_file() {
         let now = Instant::now();
-        let result = read_qvd("test/big_file.qvd");
+        let result = read_qvd("test/big_file.qvd").unwrap();
         let duration = Instant::now().checked_duration_since(now).unwrap();
         println!("Duration reading: {duration:?}");
 
