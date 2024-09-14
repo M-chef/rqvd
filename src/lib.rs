@@ -1,41 +1,13 @@
 use bitvec::prelude::*;
+use column::{CellValue, Column, Header};
 use quick_xml::de::from_str;
 use qvd_structure::{QvdFieldHeader, QvdTableHeader};
-use std::collections::BTreeMap;
-use std::error::Error;
-use std::fmt::Display;
-use std::io::{BufReader, SeekFrom};
-use std::io::{self, Read};
-use std::path::Path;
-use std::str;
-use std::{collections::HashMap, fs::File};
-use std::{convert::TryInto, io::prelude::*};
+use std::{convert::TryInto, fs::File, io::{self, BufReader, Read, BufRead}, path::Path};
+
 pub mod qvd_structure;
+pub mod column;
 
-type Row = BTreeMap<Header, CellValue>;
 
-#[derive(Debug, PartialEq, Eq, Hash, Clone, PartialOrd, Ord)]
-struct Header(String);
-
-#[derive(Debug, PartialEq, Clone)]
-enum CellValue {
-    Text(String),
-    Int(i32),
-    Float(f32),
-    Null,
-}
-
-impl Display for CellValue {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let s = match self {
-            CellValue::Text(s) => s,
-            CellValue::Int(i) => &i.to_string(),
-            CellValue::Float(f) => &f.to_string(),
-            CellValue::Null => &String::new(),
-        };
-        write!(f, "{s}")
-    }
-}
 
 #[derive(Debug)]
 pub struct QvdError {
@@ -54,8 +26,7 @@ impl From<io::Error> for QvdError {
     }
 }
 
-
-fn read_qvd(file_name: impl AsRef<Path>) -> Result<Vec<Row>, QvdError> {
+fn read_qvd(file_name: impl AsRef<Path>) -> Result<Vec<Column>, QvdError> {
     let file = File::open(&file_name)?;
     let mut reader = BufReader::new(file);
     let xml: String = get_xml_data(&mut reader)?;
@@ -67,50 +38,25 @@ fn read_qvd(file_name: impl AsRef<Path>) -> Result<Vec<Row>, QvdError> {
     let row_section_new = &buf_new[rows_start..buf_new.len()];
     let record_byte_size = qvd_structure.record_byte_size;
 
-    let mut rows = Vec::new();
-
-    let data: HashMap<Header, Vec<Option<String>>> = qvd_structure.fields.headers.iter().map(|field| {
-        let symbols = get_symbols_as_strings(&buf_new, field);
-        let symbol_indexes = get_row_indexes(row_section_new, field, record_byte_size);
-        let values = match_symbols_with_indexes(&symbols, &symbol_indexes);
-        (Header(field.field_name.clone()), values)
+    let columns = qvd_structure.fields.headers.iter().map(|field| {
+        Column {
+            header: Header(field.field_name.clone()),
+            symbols: get_column_values(&buf_new, field),
+            indexes: get_row_indexes(row_section_new, field, record_byte_size),
+        }
     }).collect();
 
-    for idx in 0..qvd_structure.no_of_records as usize {
-        let mut row = Row::new();
-        for key in data.keys() {
-            let cell_data = data.get(key).unwrap().get(idx).unwrap().clone();
-            let cell = match cell_data {
-                Some(s) => CellValue::Text(s),
-                None => CellValue::Null,
-            };
-            row.insert(key.clone(), cell);
-        }
-        rows.push(row);
-    }
-
-    Ok(rows)
-
+    Ok(columns)
 
 }
 
-fn match_symbols_with_indexes(symbols: &[String], pointers: &[i64]) -> Vec<Option<String>> {
-    let mut cols: Vec<Option<String>> = Vec::new();
-    for pointer in pointers.iter() {
-        if symbols.is_empty() || *pointer < 0 {
-            cols.push(None);
-        } else {
-            cols.push(Some(symbols[*pointer as usize].clone()));
-        }
-    }
-    cols
-}
 
-fn get_symbols_as_strings(buf: &[u8], field: &QvdFieldHeader) -> Vec<String> {
+fn get_column_values(buf: &[u8], field: &QvdFieldHeader) -> Vec<CellValue> {
     let start = field.offset;
     let end = start + field.length;
     let mut string_start: usize = 0;
-    let mut strings: Vec<String> = Vec::new();
+
+    let mut cell_values = Vec::new();
 
     let mut i = start;
     while i < end {
@@ -127,7 +73,7 @@ fn get_symbols_as_strings(buf: &[u8], field: &QvdFieldHeader) -> Vec<String> {
                     field.field_name, start, i
                 )
                 });
-                strings.push(value);
+                cell_values.push(CellValue::Text(value));
                 i += 1;
             }
             1 => {
@@ -135,7 +81,7 @@ fn get_symbols_as_strings(buf: &[u8], field: &QvdFieldHeader) -> Vec<String> {
                 let target_bytes = buf[i + 1..i + 5].to_vec();
                 let byte_array: [u8; 4] = target_bytes.try_into().unwrap();
                 let numeric_value = i32::from_le_bytes(byte_array);
-                strings.push(numeric_value.to_string());
+                cell_values.push(CellValue::Int(numeric_value));
                 i += 5;
             }
             2 => {
@@ -143,7 +89,7 @@ fn get_symbols_as_strings(buf: &[u8], field: &QvdFieldHeader) -> Vec<String> {
                 let target_bytes = buf[i + 1..i + 9].to_vec();
                 let byte_array: [u8; 8] = target_bytes.try_into().unwrap();
                 let numeric_value = f64::from_le_bytes(byte_array);
-                strings.push(numeric_value.to_string());
+                cell_values.push(CellValue::Float(numeric_value));
                 i += 9;
             }
             4 => {
@@ -170,27 +116,27 @@ fn get_symbols_as_strings(buf: &[u8], field: &QvdFieldHeader) -> Vec<String> {
             }
         }
     }
-    strings
+    cell_values
 }
 
 // Retrieve bit stuffed data. Each row has index to value from symbol map.
-fn get_row_indexes(buf: &[u8], field: &QvdFieldHeader, record_byte_size: usize) -> Vec<i64> {
-    let mut indexes: Vec<i64> = Vec::with_capacity(buf.len() / record_byte_size);
+fn get_row_indexes(buf: &[u8], field: &QvdFieldHeader, record_byte_size: usize) -> Vec<isize> {
+    let mut indexes: Vec<isize> = Vec::with_capacity(buf.len() / record_byte_size);
     for chunk in buf.chunks(record_byte_size) {
         let mut chunk = chunk.to_vec();
         chunk.reverse();
 
         let bits = BitSlice::<Msb0, _>::from_slice(&chunk).unwrap();
         let start = bits.len() - field.bit_offset;
-        let end = bits.len() - field.bit_offset - field.bit_width;
+        let end = start - field.bit_width;
         let index = bitslice_to_u32(&bits[end..start]);
-        indexes.push(index  + field.bias as i64);
+        indexes.push(index  + field.bias);
     }
     indexes
 }
 
-fn bitslice_to_u32(slice: &BitSlice::<Msb0, u8>) -> i64 {
-    slice.iter().fold(0, |acc, &bit| (acc << 1) | bit as i64)
+fn bitslice_to_u32(slice: &BitSlice::<Msb0, u8>) -> isize {
+    slice.iter().fold(0, |acc, &bit| (acc << 1) | bit as isize)
 }
 
 fn get_xml_data(reader: &mut BufReader<File>) -> Result<String, io::Error> {
@@ -208,6 +154,8 @@ fn get_xml_data(reader: &mut BufReader<File>) -> Result<String, io::Error> {
 mod tests {
     use std::{fs::OpenOptions, time::Instant};
 
+    use column::{CellValue, Header};
+
     use super::*;
 
     #[test]
@@ -224,8 +172,8 @@ mod tests {
             bit_offset: 0,
             bit_width: 0,
         };
-        let res = get_symbols_as_strings(&buf, &field);
-        let expected = vec![420.0.to_string(), 421.0.to_string()];
+        let res = get_column_values(&buf, &field);
+        let expected = vec![CellValue::Float(420.0), CellValue::Float(421.0)];
         assert_eq!(expected, res);
     }
 
@@ -240,8 +188,8 @@ mod tests {
             bit_offset: 0,
             bit_width: 0,
         };
-        let res = get_symbols_as_strings(&buf, &field);
-        let expected = vec![10.0.to_string(), 20.0.to_string()];
+        let res = get_column_values(&buf, &field);
+        let expected = vec![CellValue::Int(10), CellValue::Int(20)];
         assert_eq!(expected, res);
     }
 
@@ -264,14 +212,14 @@ mod tests {
             bit_offset: 0,
             bit_width: 0,
         };
-        let res = get_symbols_as_strings(&buf, &field);
-        let expected: Vec<String> = vec![
-            420.to_string(),
-            421.to_string(),
-            1.to_string(),
-            2.to_string(),
-            7000.to_string(),
-            865.2.to_string()
+        let res = get_column_values(&buf, &field);
+        let expected = vec![
+            CellValue::Float(420.),
+            CellValue::Float(421.),
+            CellValue::Int(1),
+            CellValue::Int(2),
+            CellValue::Text("7000".into()),
+            CellValue::Text("865.2".into())
         ];
         assert_eq!(expected, res);
     }
@@ -290,8 +238,8 @@ mod tests {
             bit_offset: 0,
             bit_width: 0,
         };
-        let res = get_symbols_as_strings(&buf, &field);
-        let expected: Vec<String> = vec!["example text".into(), "rust".into()];
+        let res = get_column_values(&buf, &field);
+        let expected = vec![CellValue::Text("example text".into()), CellValue::Text("rust".into())];
         assert_eq!(expected, res);
     }
 
@@ -302,6 +250,7 @@ mod tests {
             0x04, 0xE4, 0xB9, 0x9F, 0xE6, 0x9C, 0x89, 0xE4, 0xB8, 0xAD, 0xE6, 0x96, 0x87, 0xE7,
             0xAE, 0x80, 0xE4, 0xBD, 0x93, 0xE5, 0xAD, 0x97, 0x00,
             0x04, 0xF0, 0x9F, 0x90, 0x8D, 0xF0, 0x9F, 0xA6, 0x80, 0x00,
+            0x04, 0x54, 0x72, 0xC3, 0xA4, 0x67, 0x65, 0x72, 0x00,
         ];
 
         let field = QvdFieldHeader {
@@ -312,8 +261,8 @@ mod tests {
             bit_offset: 0,
             bit_width: 0,
         };
-        let res = get_symbols_as_strings(&buf, &field);
-        let expected: Vec<String> = vec!["也有中文简体字".into(), "🐍🦀".into()];
+        let res = get_column_values(&buf, &field);
+        let expected = vec![CellValue::Text("也有中文简体字".into()), CellValue::Text("🐍🦀".into()), CellValue::Text("Träger".into())];
         assert_eq!(expected, res);
     }
 
@@ -332,12 +281,12 @@ mod tests {
             bit_offset: 0,
             bit_width: 0,
         };
-        let res = get_symbols_as_strings(&buf, &field);
-        let expected: Vec<String> = vec![
-            "example text".into(),
-            "rust".into(),
-            "1234".into(),
-            "double".into(),
+        let res = get_column_values(&buf, &field);
+        let expected = vec![
+            CellValue::Text("example text".into()),
+            CellValue::Text("rust".into()),
+            CellValue::Text("1234".into()),
+            CellValue::Text("double".into()),
         ];
         assert_eq!(expected, res);
     }
@@ -357,7 +306,7 @@ mod tests {
         };
         let record_byte_size = buf.len();
         let res = get_row_indexes(&buf, &field, record_byte_size);
-        let expected: Vec<i64> = vec![5];
+        let expected: Vec<isize> = vec![5];
         assert_eq!(expected, res);
     }
 
@@ -365,64 +314,89 @@ mod tests {
     fn read_test_file_qvd_null() {
         let result = read_qvd("tests/test_qvd_null.qvd").unwrap();
 
-        let some_null = [
-            CellValue::Text(1.2.to_string()), 
-            CellValue::Text(format!("{:.1}", 10.0)), 
-            CellValue::Text(64.to_string()),
-            CellValue::Null,
-            CellValue::Null,
-            CellValue::Null,
-            CellValue::Text(1.to_string()),
-            CellValue::Text(213.95625.to_string()),
-            CellValue::Text(2.to_string()),
-            CellValue::Text(3.to_string()),
-            CellValue::Text(5.to_string()),
-            CellValue::Text(1000.to_string()),
-        ];
+        let mut expected: Vec<Column> = Vec::new();
 
-        let mut expected = Vec::new();
-        for i in 1..=12 {
-            let mut map = BTreeMap::new();
-            map.insert(Header("Quarter".into()), CellValue::Text(format!("Q{}", (i - 1) / 3 + 1)));
-            map.insert(Header("Month".into()), CellValue::Text(i.to_string()));
-            map.insert(Header("some_null".into()), some_null[i - 1].clone());
-            map.insert(Header("all Null".into()), CellValue::Null);
-            expected.push(map);
-        }
-        
-        assert_eq!(expected, result);
+        expected.push( Column {
+            header: Header("Month".into()),
+            symbols: {
+                (1..=12).map(|i| {  CellValue::Text(format!("{}", i))}).collect()
+            },
+            indexes: vec![0,1,2,3,4,5,6,7,8,9,10,11],
+        });
+        assert_eq!(expected[0], result[0]);
+
+        expected.push( Column {
+            header: Header("Quarter".into()),
+            symbols: {
+                (1..=4).map(|i| {  CellValue::Text(format!("Q{}", i))}).collect()
+            },
+            indexes: vec![0,0,0,1,1,1,2,2,2,3,3,3],
+        });
+        assert_eq!(expected[1], result[1]);
+
+        expected.push( Column {
+            header: Header("some_null".into()),
+            symbols: vec![
+                CellValue::Text(1.2.to_string()), 
+                CellValue::Text(format!("{:.1}", 10.0)), 
+                CellValue::Text(64.to_string()),
+                CellValue::Text(1.to_string()),
+                CellValue::Text(213.95625.to_string()),
+                CellValue::Text(2.to_string()),
+                CellValue::Text(3.to_string()),
+                CellValue::Text(5.to_string()),
+                CellValue::Text(1000.to_string()),
+            ],
+            indexes: vec![0,1,2,-2,-2,-2,3,4,5,6,7,8],
+        });
+        assert_eq!(expected[2], result[2]);
+
+        expected.push( Column {
+            header: Header("all Null".into()),
+            symbols: vec![],
+            indexes: vec![-2,-2,-2,-2,-2,-2,-2,-2,-2,-2,-2,-2],
+        });
+        assert_eq!(expected[3], result[3]);
+
+    
     }
 
     #[test]
     #[ignore = "manual test"]
-    fn read_test_file() {
+    fn read_test_file_columns() {
+        use std::io::Write;
+        
         let now = Instant::now();
         let result = read_qvd("test/big_file.qvd").unwrap();
         let duration = Instant::now().checked_duration_since(now).unwrap();
         println!("Duration reading: {duration:?}");
 
-        assert_eq!(result.len(), 20526);
+        let rows = result[0].indexes.len();
+        assert_eq!(rows, 20526);
         let mut file = OpenOptions::new()
             .create(true)
             .write(true)
             .truncate(true)
             .open("output.csv")
             .unwrap();
-        
-        let header = result.first().unwrap().keys().map(|k| k.0.as_str())
-            .collect::<Vec<&str>>()
-            .join(",");
-        file.write_all(header.as_bytes()).unwrap();
-            
-        for row in result {
-            let mut content = row.into_iter().map(|(key, values)| {
-                values.to_string()
-            })
-                .collect::<Vec<String>>()
-                .join(",");
-            content.push('\n');
-            file.write_all(content.as_bytes()).unwrap();
+
+        let headers =  result.iter().map(|col| col.header.0.as_str()).collect::<Vec<_>>().join(",");
+        file.write_all(headers.as_bytes()).unwrap();
+        file.write_all(b"\n").unwrap();
+
+        let mut row = Vec::new();
+        for i in 0..rows {
+            for column in result.iter() {
+                let cell_value = column.cell_value(i).unwrap();
+                row.push(cell_value)
+            }
+            let s: String = row.drain(..).map(|cell_value| cell_value.to_string()).collect::<Vec<String>>().join(",");
+            file.write_all(s.as_bytes()).unwrap();
+            file.write_all(b"\n").unwrap();
         }
+
+        let duration = Instant::now().checked_duration_since(now).unwrap();
+        println!("Duration reading: {duration:?}");
         
     }
 }

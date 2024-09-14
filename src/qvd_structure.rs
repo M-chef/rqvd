@@ -35,5 +35,5 @@ pub struct QvdFieldHeader {
     #[serde(rename = "BitWidth")]
     pub bit_width: usize,
     #[serde(rename = "Bias")]
-    pub bias: i32,
+    pub bias: isize,
 }
