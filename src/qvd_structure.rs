@@ -22,6 +22,7 @@ pub struct Fields {
     #[serde(rename = "$value", default)]
     pub headers: Vec<QvdFieldHeader>,
 }
+
 #[derive(Debug, Deserialize)]
 pub struct QvdFieldHeader {
     #[serde(rename = "FieldName")]

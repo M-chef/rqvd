@@ -19,4 +19,5 @@ crate-type = ["lib"]
 serde = { version = "1.0.117", features = ["derive"] }
 quick-xml = { version = "0.20.0", features = ["serialize"]}
 bitvec = "0.19.4"
+rayon = "1.10.0"
 

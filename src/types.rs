@@ -1,4 +1,22 @@
-use std::fmt::Display;
+use std::{fmt::Display, path::Path};
+
+use crate::{error::QvdError, reader::read_qvd};
+
+#[derive(Debug)]
+pub struct QvdDocument {
+    columns: Vec<Column>
+}
+
+impl QvdDocument {
+    pub fn read(path: impl AsRef<Path>) -> Result<Self, QvdError> {
+        let columns = read_qvd(path.as_ref())?;
+        Ok(Self { columns })
+    }
+
+    pub fn columns(&self) -> &[Column] {
+        &self.columns
+    }
+}
 
 #[derive(Debug, PartialEq)]
 pub struct Column {
