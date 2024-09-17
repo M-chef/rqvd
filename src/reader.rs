@@ -1,4 +1,4 @@
-use std::{borrow::Cow, fs::File, io::{self, BufRead, BufReader, Read}, path::Path};
+use std::{fs::File, io::{self, BufRead, BufReader, Read}, path::Path};
 
 use bitvec::{order::Msb0, slice::BitSlice};
 use quick_xml::de::from_str;
@@ -77,7 +77,18 @@ fn get_column_values_from_buf(field_buf: &[u8]) -> Vec<CellValue> {
                 // Strings are null terminated
                 // Read bytes from start fo string (string_start) up to current byte.
                 let value = string_from_buf(field_buf, string_start, i);
-                cell_values.push(CellValue::Text(value.into()));
+                match value {
+                    Ok(s) => {
+                        if let Ok(int) = s.parse::<i32>() {
+                            cell_values.push(CellValue::Int(int));
+                        } else if let Ok(float) = s.parse::<f64>() {
+                            cell_values.push(CellValue::Float(float));
+                        } else {
+                            cell_values.push(CellValue::Text(s.into()))
+                        }
+                    },
+                    Err(_) => cell_values.push(CellValue::Null),
+                }
                 i += 1;
             }
             1 => {
@@ -119,9 +130,10 @@ fn get_column_values_from_buf(field_buf: &[u8]) -> Vec<CellValue> {
     cell_values
 }
 
-fn string_from_buf(field_buf: &[u8], string_start: usize, end: usize) -> Cow<'_, str> {
+fn string_from_buf(field_buf: &[u8], string_start: usize, end: usize) -> Result<&str, QvdError> {
     let utf8_bytes =  &field_buf[string_start..end];
-    String::from_utf8_lossy(utf8_bytes)
+    let s = std::str::from_utf8(utf8_bytes)?;
+    Ok(s)
 }
 
 fn int_from_buf(field_buf: &[u8], pos: usize) -> i32 {
@@ -202,8 +214,8 @@ mod tests {
             CellValue::Float(421.),
             CellValue::Int(1),
             CellValue::Int(2),
-            CellValue::Text("7000".into()),
-            CellValue::Text("865.2".into())
+            CellValue::Int(7000),
+            CellValue::Float(865.2)
         ];
         assert_eq!(expected, res);
     }
@@ -244,7 +256,7 @@ mod tests {
         let expected = vec![
             CellValue::Text("example text".into()),
             CellValue::Text("rust".into()),
-            CellValue::Text("1234".into()),
+            CellValue::Int(1234),
             CellValue::Text("double".into()),
         ];
         assert_eq!(expected, res);
@@ -271,21 +283,21 @@ mod tests {
 
     #[test]
     fn read_test_file_qvd_null_parallel() {
-        let result = read_qvd("tests/test_qvd_null.qvd").unwrap();
+        let result = read_qvd("tests/test_file.qvd").unwrap();
 
         let mut expected: Vec<Column> = Vec::new();
 
         expected.push( Column {
-            header: Header("Month".into()),
+            header: Header("all_int".into()),
             symbols: {
-                (1..=12).map(|i| {  CellValue::Text(format!("{}", i))}).collect()
+                (1..=12).map(|i| {  CellValue::Int(i) }).collect()
             },
             indexes: vec![0,1,2,3,4,5,6,7,8,9,10,11],
         });
         assert_eq!(expected[0], result[0]);
 
         expected.push( Column {
-            header: Header("Quarter".into()),
+            header: Header("all_string".into()),
             symbols: {
                 (1..=4).map(|i| {  CellValue::Text(format!("Q{}", i))}).collect()
             },
@@ -294,28 +306,48 @@ mod tests {
         assert_eq!(expected[1], result[1]);
 
         expected.push( Column {
+            header: Header("all_float".into()),
+            symbols: vec![
+                CellValue::Float(1.1), 
+                CellValue::Float(2.2),
+                CellValue::Float(3.3),
+                CellValue::Float(4.4),
+                CellValue::Float(5.5),
+                CellValue::Float(6.6),
+                CellValue::Float(7.7),
+                CellValue::Float(8.8),
+                CellValue::Float(9.9),
+                CellValue::Float(10.1),
+                CellValue::Float(11.11),
+                CellValue::Float(12.12),
+            ],
+            indexes: vec![0,1,2,3,4,5,6,7,8,9,10,11],
+        });
+        assert_eq!(expected[2], result[2]);
+
+        expected.push( Column {
             header: Header("some_null".into()),
             symbols: vec![
-                CellValue::Text(1.2.to_string()), 
-                CellValue::Text(format!("{:.1}", 10.0)), 
-                CellValue::Text(64.to_string()),
-                CellValue::Text(1.to_string()),
-                CellValue::Text(213.95625.to_string()),
-                CellValue::Text(2.to_string()),
-                CellValue::Text(3.to_string()),
-                CellValue::Text(5.to_string()),
-                CellValue::Text(1000.to_string()),
+                CellValue::Float(1.2), 
+                CellValue::Float(10.0), 
+                CellValue::Int(64),
+                CellValue::Int(1),
+                CellValue::Float(213.95625),
+                CellValue::Int(2),
+                CellValue::Int(3),
+                CellValue::Int(5),
+                CellValue::Int(1000),
             ],
             indexes: vec![0,1,2,-2,-2,-2,3,4,5,6,7,8],
         });
-        assert_eq!(expected[2], result[2]);
+        assert_eq!(expected[3], result[3]);
 
         expected.push( Column {
             header: Header("all Null".into()),
             symbols: vec![],
             indexes: vec![-2,-2,-2,-2,-2,-2,-2,-2,-2,-2,-2,-2],
         });
-        assert_eq!(expected[3], result[3]);
+        assert_eq!(expected[4], result[4]);
 
     
     }
@@ -330,5 +362,20 @@ mod tests {
 
         let rows = result[0].indexes.len();
         assert_eq!(rows, 300000);
+    }
+
+    #[test]
+    #[ignore = "manual test"]
+    fn read_int_file() {        
+        let result = read_qvd("tests/ints.qvd").unwrap();
+        assert_eq!(result.into_iter().next().unwrap().into_values(), vec![CellValue::Int(1), 2.into(), 3.into()] );
+    }
+
+    #[test]
+    #[ignore = "manual test"]
+    fn read_floats_file() {        
+        let result = read_qvd("tests/floats.qvd").unwrap();
+        let vec_of_values: Vec<_> = result.into_iter().map(|col| col.into_values()).collect();
+        assert_eq!(vec_of_values, vec![ vec![CellValue::Int(1), 2.into(), 3.into()], vec![CellValue::Float(1.1), 2.1.into(), 3.1.into()]]);
     }
 }

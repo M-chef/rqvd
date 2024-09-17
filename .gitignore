@@ -20,3 +20,6 @@ clients.qvd
 *.pyc
 *.pyc
 *.pyd
+
+# qvw files
+**/*.qvw
