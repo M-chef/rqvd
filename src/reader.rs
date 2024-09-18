@@ -6,6 +6,8 @@ use rayon::prelude::*;
 
 use crate::{types::{CellValue, Column, Header}, qvd_structure::{QvdFieldHeader, QvdTableHeader}, error::QvdError};
 
+const MAX_EXACT_F64: u128 = 1 << 53;  // 2^53
+
 pub(crate) fn read_qvd(file_name: impl AsRef<Path>) -> Result<Vec<Column>, QvdError> {
     let file = File::open(&file_name)?;
     let mut reader = BufReader::new(file);
@@ -81,8 +83,12 @@ fn get_column_values_from_buf(field_buf: &[u8]) -> Vec<CellValue> {
                     Ok(s) => {
                         if let Ok(int) = s.parse::<i32>() {
                             cell_values.push(CellValue::Int(int));
-                        } else if let Ok(float) = s.parse::<f64>() {
-                            cell_values.push(CellValue::Float(float));
+                        } else if let (Ok(float), Ok(n)) = (s.parse::<f64>(), s.parse::<u128>()) {
+                            if n >= MAX_EXACT_F64 {
+                                cell_values.push(CellValue::Text(s.into()))
+                            } else {
+                                cell_values.push(CellValue::Float(float))
+                            }
                         } else {
                             cell_values.push(CellValue::Text(s.into()))
                         }
@@ -251,6 +257,10 @@ mod tests {
             4, 101, 120, 97, 109, 112, 108, 101, 32, 116, 101, 120, 116, 0, 4, 114, 117, 115, 116,
             0, 5, 42, 65, 80, 1, 49, 50, 51, 52, 0, 6, 1, 1, 1, 1, 1, 1, 1, 1, 100, 111, 117, 98,
             108, 101, 0,
+            4, 49, 49, 49, 49, 49, 49, 49, 49, 49, 49, 0,
+            4, 49, 49, 49, 49, 49, 49, 49, 49, 49, 49, 49, 49, 49, 49, 49, 49, 0,
+            4, 49, 49, 49, 49, 49, 49, 49, 49, 49, 49, 49, 49, 49, 49, 49, 49, 49, 0
+
         ];
         let res = get_column_values_from_buf(&buf);
         let expected = vec![
@@ -258,6 +268,9 @@ mod tests {
             CellValue::Text("rust".into()),
             CellValue::Int(1234),
             CellValue::Text("double".into()),
+            CellValue::Int(1111111111),
+            CellValue::Float(1111111111111111.),
+            CellValue::Text("11111111111111111".into()),
         ];
         assert_eq!(expected, res);
     }
