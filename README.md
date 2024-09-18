@@ -3,55 +3,53 @@ This is a fork of the python library to read qvd's in python but modified to be 
 
 Original repo: https://github.com/SBentley/qvd-utils
 
-## Install
-
-Install from PyPi https://pypi.org/project/qvd/
-
-```sh
-pip install qvd
-```
-
 ## Usage
 
-```python
-from qvd import qvd_reader
+The main struct to read files and process content is `QvdDocument`. This can be used to access columns or to return data row wise.
 
-df = qvd_reader.read('test.qvd')
-print(df)
+```
+use rqvd::QvdDocument;
+
+fn main() {
+
+    // read a .qvd file
+    let doc = rqvd::QvdDocument::read("file.qvd").unwrap();
+    
+    // get all values of first column
+    let column_values = doc.columns().first().unwrap().as_values();
+
+    // write data to csv file
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .open("export.csv")
+        .unwrap();
+    // iter over rows
+    for row in doc.rows() {
+        let row_str = row.iter().map(|cell| cell.to_string()).collect::<Vec<_>>().join(",");
+        file.write_all(row_str.as_bytes()).unwrap();
+        file.write_all(b"\n").unwrap();
+    }
+
+}
+
 ```
 
-![example](https://raw.githubusercontent.com/SBentley/qvd-utils/master/example.png)
 
-### Developing
 
-Create a virtual env https://docs.python-guide.org/dev/virtualenvs/ and activate it.
+## Notes
 
-```sh
-python3 -m venv venv
-```
+While based on and heavily inspired by the original code, reading performance of .qvd files is improved by reusing buffer and using rayon for parallel processing. Currently columns are processed in parallel, so tables with more columns benefit more from parallel processing.
 
-Then install dev dependencies:
+The internal layout when reading a file to memory is kept in columnar representation to mirror the datalayout of .qvd files. Also the structure of symbol table and index map is used. 
 
-```sh
-pip install pandas maturin
-```
+## Todos
 
-Afterwards, run 
-
-```sh
-maturin develop --release
-```
-
-to install the generated python lib to the virtual env.
-
-## Test
-
-To run the tests, you can use these commands:
-
-```sh
-cargo test  # runs all Rust unit tests
-pytest test_qvd_reader.py  # runs all Python tests
-```
+| Priority   | Task                                          |
+| :--------: | --------------------------------------------- |
+| Low        | Reimplement python support                    | 
+| Medium     | Implement more efficient in memory data model |
+| Medium     | struct and function documentation             |
 
 ## QVD File Structure
 
