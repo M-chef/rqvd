@@ -353,7 +353,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "manual test"]
     fn read_test_file_columns_parallel() {        
         let now = Instant::now();
         let result = read_qvd("tests/big_file.qvd").unwrap();
@@ -365,14 +364,12 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "manual test"]
     fn read_int_file() {        
         let result = read_qvd("tests/ints.qvd").unwrap();
         assert_eq!(result.into_iter().next().unwrap().into_values(), vec![CellValue::Int(1), 2.into(), 3.into()] );
     }
 
     #[test]
-    #[ignore = "manual test"]
     fn read_floats_file() {        
         let result = read_qvd("tests/floats.qvd").unwrap();
         let vec_of_values: Vec<_> = result.into_iter().map(|col| col.into_values()).collect();
