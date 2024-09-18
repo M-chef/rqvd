@@ -1,5 +1,5 @@
 [package]
-name = "qvd"
+name = "rqvd"
 version = "0.0.1"
 authors = ["Matthias Scheffelmeier <matthias.scheffelmeier@continental.com>"]
 edition = "2021"
