@@ -1,48 +1,59 @@
-use std::{fs::File, io::{self, BufRead, BufReader, Read}, path::Path};
+use std::{
+    fs::File,
+    io::{self, BufRead, BufReader, Read},
+    path::Path,
+};
 
 use bitvec::{order::Msb0, slice::BitSlice};
 use quick_xml::de::from_str;
 use rayon::prelude::*;
 
-use crate::{types::{CellValue, Column, Header}, qvd_structure::{QvdFieldHeader, QvdTableHeader}, error::QvdError};
+use crate::{
+    error::{QvdError, QvdErrorKind},
+    qvd_structure::{QvdFieldHeader, QvdTableHeader},
+    types::{CellValue, Column, Header},
+};
 
-const MAX_EXACT_F64: u128 = 1 << 53;  // 2^53
+const MAX_EXACT_F64: u128 = 1 << 53; // 2^53
 
 pub(crate) fn read_qvd(file_name: impl AsRef<Path>) -> Result<Vec<Column>, QvdError> {
     let file = File::open(&file_name)?;
     let mut reader = BufReader::new(file);
     let xml: String = get_xml_data(&mut reader)?;
-    let qvd_structure: QvdTableHeader = from_str(&xml).unwrap();    
+    let qvd_structure: QvdTableHeader = from_str(&xml).unwrap();
 
     let mut buf = Vec::new();
     reader.read_to_end(&mut buf).unwrap();
     let (symbol_map, row_section) = buf.split_at(qvd_structure.offset);
     let record_byte_size = qvd_structure.record_byte_size;
 
-    let fields: Vec<Field> = qvd_structure.fields.headers.iter().map(|field_header| {
-        Field::from_header_and_symbol_map(field_header, symbol_map)
-    }).collect();
+    let fields: Vec<Field> = qvd_structure
+        .fields
+        .headers
+        .iter()
+        .map(|field_header| Field::from_header_and_symbol_map(field_header, symbol_map))
+        .collect();
 
-    let columns = fields.into_par_iter().map(|field| {
-        Column {
+    let columns = fields
+        .into_par_iter()
+        .map(|field| Column {
             header: Header(field.field_header.field_name.clone()),
             symbols: field.get_column_values(),
             indexes: get_row_indexes(row_section, field.field_header, record_byte_size),
-        }
-    }).collect();
+        })
+        .collect();
 
     Ok(columns)
-
 }
 
 fn get_xml_data(reader: &mut BufReader<File>) -> Result<String, io::Error> {
     let mut buffer = Vec::new();
     // There is a line break, carriage return and a null terminator between the XMl and data
     // Find the null terminator
-    reader.read_until(0, &mut buffer)
+    reader
+        .read_until(0, &mut buffer)
         .expect("Failed to read file");
-    let xml_string =
-        String::from_utf8(buffer).expect("xml section contains invalid UTF-8 chars");
+    let xml_string = String::from_utf8(buffer).expect("xml section contains invalid UTF-8 chars");
     Ok(xml_string)
 }
 
@@ -56,9 +67,9 @@ impl<'a> Field<'a> {
         let start = header.offset;
         let end = start + header.length;
         let field_buf = &buf[start..end];
-        Self { 
-            field_header: 
-            header, field_buf,
+        Self {
+            field_header: header,
+            field_buf,
         }
     }
 
@@ -83,7 +94,16 @@ fn get_column_values_from_buf(field_buf: &[u8]) -> Vec<CellValue> {
                     Ok(s) => {
                         if let Ok(int) = s.parse::<i32>() {
                             cell_values.push(CellValue::Int(int));
-                        } else if let (Ok(float), Ok(n)) = (s.parse::<f64>(), s.parse::<u128>()) {
+                        } else if let (Ok(float), Ok(n)) = (
+                            s.parse::<f64>(),
+                            s.split('.')
+                                .next()
+                                .ok_or(QvdError {
+                                    kind: QvdErrorKind::ParseError,
+                                    message: "could not parse u128".into(),
+                                })
+                                .and_then(|s| s.parse::<u128>().map_err(|err| err.into())),
+                        ) {
                             if n >= MAX_EXACT_F64 {
                                 cell_values.push(CellValue::Text(s.into()))
                             } else {
@@ -92,7 +112,7 @@ fn get_column_values_from_buf(field_buf: &[u8]) -> Vec<CellValue> {
                         } else {
                             cell_values.push(CellValue::Text(s.into()))
                         }
-                    },
+                    }
                     Err(_) => cell_values.push(CellValue::Null),
                 }
                 i += 1;
@@ -137,24 +157,22 @@ fn get_column_values_from_buf(field_buf: &[u8]) -> Vec<CellValue> {
 }
 
 fn string_from_buf(field_buf: &[u8], string_start: usize, end: usize) -> Result<&str, QvdError> {
-    let utf8_bytes =  &field_buf[string_start..end];
+    let utf8_bytes = &field_buf[string_start..end];
     let s = std::str::from_utf8(utf8_bytes)?;
     Ok(s)
 }
 
 fn int_from_buf(field_buf: &[u8], pos: usize) -> i32 {
-    let target_bytes =  &field_buf[pos + 1..pos + 5];
+    let target_bytes = &field_buf[pos + 1..pos + 5];
     let byte_array: [u8; 4] = target_bytes.try_into().unwrap();
     i32::from_le_bytes(byte_array)
 }
 
 fn float_from_buf(field_buf: &[u8], pos: usize) -> f64 {
-    let target_bytes =  &field_buf[pos + 1..pos + 9];
+    let target_bytes = &field_buf[pos + 1..pos + 9];
     let byte_array: [u8; 8] = target_bytes.try_into().unwrap();
     f64::from_le_bytes(byte_array)
 }
-
-
 
 // Retrieve bit stuffed data. Each row has index to value from symbol map.
 fn get_row_indexes(buf: &[u8], field: &QvdFieldHeader, record_byte_size: usize) -> Vec<isize> {
@@ -167,12 +185,12 @@ fn get_row_indexes(buf: &[u8], field: &QvdFieldHeader, record_byte_size: usize) 
         let start = bits.len() - field.bit_offset;
         let end = start - field.bit_width;
         let index = bitslice_to_u32(&bits[end..start]);
-        indexes.push(index  + field.bias);
+        indexes.push(index + field.bias);
     }
     indexes
 }
 
-fn bitslice_to_u32(slice: &BitSlice::<Msb0, u8>) -> isize {
+fn bitslice_to_u32(slice: &BitSlice<Msb0, u8>) -> isize {
     slice.iter().fold(0, |acc, &bit| (acc << 1) | bit as isize)
 }
 
@@ -207,9 +225,9 @@ mod tests {
     #[rustfmt::skip]
     fn test_mixed_numbers() {
         let buf: Vec<u8> = vec![
-            0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x7a, 0x40, 
+            0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x7a, 0x40,
             0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x50, 0x7a, 0x40,
-            0x01, 0x01, 0x00, 0x00, 0x00, 
+            0x01, 0x01, 0x00, 0x00, 0x00,
             0x01, 0x02, 0x00, 0x00, 0x00,
             0x05, 0x00, 0x00, 0x00, 0x00, 0x37, 0x30, 0x30, 0x30, 0x00,
             0x06, 0x00,0x00,0x00, 0x00,0x00,0x00,0x00,0x00, 0x38, 0x36, 0x35, 0x2e, 0x32, 0x00
@@ -233,7 +251,10 @@ mod tests {
             0,
         ];
         let res = get_column_values_from_buf(&buf);
-        let expected = vec![CellValue::Text("example text".into()), CellValue::Text("rust".into())];
+        let expected = vec![
+            CellValue::Text("example text".into()),
+            CellValue::Text("rust".into()),
+        ];
         assert_eq!(expected, res);
     }
 
@@ -256,11 +277,9 @@ mod tests {
         let buf: Vec<u8> = vec![
             4, 101, 120, 97, 109, 112, 108, 101, 32, 116, 101, 120, 116, 0, 4, 114, 117, 115, 116,
             0, 5, 42, 65, 80, 1, 49, 50, 51, 52, 0, 6, 1, 1, 1, 1, 1, 1, 1, 1, 100, 111, 117, 98,
-            108, 101, 0,
-            4, 49, 49, 49, 49, 49, 49, 49, 49, 49, 49, 0,
-            4, 49, 49, 49, 49, 49, 49, 49, 49, 49, 49, 49, 49, 49, 49, 49, 49, 0,
-            4, 49, 49, 49, 49, 49, 49, 49, 49, 49, 49, 49, 49, 49, 49, 49, 49, 49, 0
-
+            108, 101, 0, 4, 49, 49, 49, 49, 49, 49, 49, 49, 49, 49, 0, 4, 49, 49, 49, 49, 49, 49,
+            49, 49, 49, 49, 49, 49, 49, 49, 49, 49, 0, 4, 49, 49, 49, 49, 49, 49, 49, 49, 49, 49,
+            49, 49, 49, 49, 49, 49, 49, 0,
         ];
         let res = get_column_values_from_buf(&buf);
         let expected = vec![
@@ -300,28 +319,28 @@ mod tests {
 
         let mut expected: Vec<Column> = Vec::new();
 
-        expected.push( Column {
+        expected.push(Column {
             header: Header("all_int".into()),
-            symbols: {
-                (1..=12).map(|i| {  CellValue::Int(i) }).collect()
-            },
-            indexes: vec![0,1,2,3,4,5,6,7,8,9,10,11],
+            symbols: { (1..=12).map(|i| CellValue::Int(i)).collect() },
+            indexes: vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
         });
         assert_eq!(expected[0], result[0]);
 
-        expected.push( Column {
+        expected.push(Column {
             header: Header("all_string".into()),
             symbols: {
-                (1..=4).map(|i| {  CellValue::Text(format!("Q{}", i))}).collect()
+                (1..=4)
+                    .map(|i| CellValue::Text(format!("Q{}", i)))
+                    .collect()
             },
-            indexes: vec![0,0,0,1,1,1,2,2,2,3,3,3],
+            indexes: vec![0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3],
         });
         assert_eq!(expected[1], result[1]);
 
-        expected.push( Column {
+        expected.push(Column {
             header: Header("all_float".into()),
             symbols: vec![
-                CellValue::Float(1.1), 
+                CellValue::Float(1.1),
                 CellValue::Float(2.2),
                 CellValue::Float(3.3),
                 CellValue::Float(4.4),
@@ -334,15 +353,15 @@ mod tests {
                 CellValue::Float(11.11),
                 CellValue::Float(12.12),
             ],
-            indexes: vec![0,1,2,3,4,5,6,7,8,9,10,11],
+            indexes: vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
         });
         assert_eq!(expected[2], result[2]);
 
-        expected.push( Column {
+        expected.push(Column {
             header: Header("some_null".into()),
             symbols: vec![
-                CellValue::Float(1.2), 
-                CellValue::Float(10.0), 
+                CellValue::Float(1.2),
+                CellValue::Float(10.0),
                 CellValue::Int(64),
                 CellValue::Int(1),
                 CellValue::Float(213.95625),
@@ -351,22 +370,20 @@ mod tests {
                 CellValue::Int(5),
                 CellValue::Int(1000),
             ],
-            indexes: vec![0,1,2,-2,-2,-2,3,4,5,6,7,8],
+            indexes: vec![0, 1, 2, -2, -2, -2, 3, 4, 5, 6, 7, 8],
         });
         assert_eq!(expected[3], result[3]);
 
-        expected.push( Column {
+        expected.push(Column {
             header: Header("all Null".into()),
             symbols: vec![],
-            indexes: vec![-2,-2,-2,-2,-2,-2,-2,-2,-2,-2,-2,-2],
+            indexes: vec![-2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2],
         });
         assert_eq!(expected[4], result[4]);
-
-    
     }
 
     #[test]
-    fn read_test_file_columns_parallel() {        
+    fn read_test_file_columns_parallel() {
         let now = Instant::now();
         let result = read_qvd("tests/big_file.qvd").unwrap();
         let duration = Instant::now().checked_duration_since(now).unwrap();
@@ -377,15 +394,24 @@ mod tests {
     }
 
     #[test]
-    fn read_int_file() {        
+    fn read_int_file() {
         let result = read_qvd("tests/ints.qvd").unwrap();
-        assert_eq!(result.into_iter().next().unwrap().into_values(), vec![CellValue::Int(1), 2.into(), 3.into()] );
+        assert_eq!(
+            result.into_iter().next().unwrap().into_values(),
+            vec![CellValue::Int(1), 2.into(), 3.into()]
+        );
     }
 
     #[test]
-    fn read_floats_file() {        
+    fn read_floats_file() {
         let result = read_qvd("tests/floats.qvd").unwrap();
         let vec_of_values: Vec<_> = result.into_iter().map(|col| col.into_values()).collect();
-        assert_eq!(vec_of_values, vec![ vec![CellValue::Int(1), 2.into(), 3.into()], vec![CellValue::Float(1.1), 2.1.into(), 3.1.into()]]);
+        assert_eq!(
+            vec_of_values,
+            vec![
+                vec![CellValue::Int(1), 2.into(), 3.into()],
+                vec![CellValue::Float(1.1), 2.1.into(), 3.1.into()]
+            ]
+        );
     }
 }
