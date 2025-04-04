@@ -1,10 +1,14 @@
-use std::{fmt::Display, path::Path};
+use std::{fmt::Display, path::Path, sync::Arc};
 
 use crate::{error::QvdError, reader::read_qvd};
 
-#[cfg(test)]
-use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
-use serde::de::value;
+use rayon::iter::{
+    plumbing::UnindexedProducer, IndexedParallelIterator, IntoParallelIterator,
+    IntoParallelRefIterator, ParallelIterator,
+};
+// #[cfg(test)]
+// use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
+// use serde::de::value;
 
 #[derive(Debug)]
 pub struct QvdDocument {
@@ -17,25 +21,17 @@ impl QvdDocument {
         Ok(Self { columns })
     }
 
-    pub fn columns(&self) -> &[Column] {
-        &self.columns
-    }
-
-    pub fn rows(&self) -> RowIter {
-        let values: Vec<_> = self.columns().iter().map(|col| col.as_values()).collect();
-        let rows_total = values[0].len();
-        RowIter {
-            values,
-            rows_total,
-            index: 0,
+    pub fn columns(&self) -> ColumnIter {
+        ColumnIter {
+            columns: &self.columns,
+            current_index: 0,
         }
     }
 
-    #[cfg(test)]
-    pub fn rows_par(&self) -> RowIter {
+    pub fn rows(&self) -> RowIter {
         let values: Vec<_> = self
             .columns()
-            .par_iter()
+            .into_par_iter()
             .map(|col| col.as_values())
             .collect();
         let rows_total = values[0].len();
@@ -46,30 +42,48 @@ impl QvdDocument {
         }
     }
 
-    #[cfg(test)]
-    pub fn rows_alt(&self) -> RowIterAlt {
-        RowIterAlt {
-            columns: self.columns(),
-            index: 0,
-        }
-    }
+    // #[cfg(test)]
+    // pub fn rows_par(&self) -> RowIter {
+    //     let values: Vec<_> = self
+    //         .columns()
+    //         .par_iter()
+    //         .map(|col| col.as_values())
+    //         .collect();
+    //     let rows_total = values[0].len();
+    //     RowIter {
+    //         values,
+    //         rows_total,
+    //         index: 0,
+    //     }
+    // }
 
+    // #[cfg(test)]
+    // pub fn rows_alt(&self) -> RowIterAlt {
+    //     RowIterAlt {
+    //         columns: self.columns(),
+    //         index: 0,
+    //     }
+    // }
+
+    /// Search row indexes in table for a given column name and cell value
     pub fn find_row_indexes(
         &self,
-        column_name: impl AsRef<str>,
+        column_name: impl Into<Arc<str>>,
         value: impl Into<CellValue>,
     ) -> Vec<usize> {
+        let column_name = column_name.into();
         self.columns
-            .iter()
-            .find(|col| col.header.0 == column_name.as_ref())
+            .par_iter()
+            .find_first(|col| col.header.0 == *column_name)
             .map(|col| col.find_row_indexes(value))
             .unwrap_or_default()
     }
 
+    /// Return an iterator over rows for given indexes
     pub fn rows_by_indexes<'a>(&'a self, row_indexes: &'a [usize]) -> RowIter<'a> {
         let values: Vec<_> = self
             .columns()
-            .iter()
+            .into_par_iter()
             .map(|col| col.indexes_to_values(row_indexes))
             .collect();
 
@@ -79,6 +93,110 @@ impl QvdDocument {
             rows_total,
             index: 0,
         }
+    }
+}
+
+pub struct ColumnIter<'a> {
+    columns: &'a [Column],
+    current_index: usize,
+}
+
+impl<'a> ColumnIter<'a> {
+    /// get the underlying slice
+    pub fn as_slice(&self) -> &'a [Column] {
+        self.columns
+    }
+}
+
+impl<'a> Iterator for ColumnIter<'a> {
+    type Item = &'a Column;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.current_index < self.columns.len() {
+            let item = &self.columns[self.current_index];
+            self.current_index += 1;
+            Some(item)
+        } else {
+            None
+        }
+    }
+}
+
+impl<'a> IntoParallelIterator for ColumnIter<'a> {
+    type Item = &'a Column;
+
+    type Iter = ParallelColumnIter<'a>;
+
+    fn into_par_iter(self) -> Self::Iter {
+        ParallelColumnIter {
+            columns: self.columns,
+        }
+    }
+}
+
+pub struct ParallelColumnIter<'a> {
+    columns: &'a [Column],
+}
+
+impl<'a> ParallelIterator for ParallelColumnIter<'a> {
+    type Item = &'a Column;
+
+    fn drive_unindexed<C>(self, consumer: C) -> C::Result
+    where
+        C: rayon::iter::plumbing::UnindexedConsumer<Self::Item>,
+    {
+        let producer = ColumnProducer {
+            columns: self.columns,
+            start: 0,
+            end: self.columns.len(),
+        };
+        rayon::iter::plumbing::bridge_unindexed(producer, consumer)
+    }
+}
+
+pub struct ColumnProducer<'a> {
+    columns: &'a [Column],
+    start: usize,
+    end: usize,
+}
+
+impl<'a> UnindexedProducer for ColumnProducer<'a> {
+    type Item = &'a Column;
+
+    fn split(self) -> (Self, Option<Self>) {
+        let len = self.end - self.start;
+        if len <= 1 {
+            // If there's 0 or 1 element, no more splitting
+            return (self, None);
+        }
+
+        let mid = self.start + len / 2;
+        let left = ColumnProducer {
+            columns: self.columns,
+            start: self.start,
+            end: mid,
+        };
+        let right = ColumnProducer {
+            columns: self.columns,
+            start: mid,
+            end: self.end,
+        };
+
+        (left, Some(right))
+    }
+
+    fn fold_with<F>(self, folder: F) -> F
+    where
+        F: rayon::iter::plumbing::Folder<Self::Item>,
+    {
+        let mut folder = folder;
+        for i in self.start..self.end {
+            folder = folder.consume(&self.columns[i]);
+            if folder.full() {
+                break;
+            }
+        }
+        folder
     }
 }
 
@@ -95,7 +213,7 @@ impl<'a, 'b: 'a> Iterator for RowIter<'a> {
         if self.index < self.rows_total {
             let row: Vec<_> = self
                 .values
-                .iter()
+                .par_iter()
                 .map(|col| *col.get(self.index).unwrap())
                 .collect();
             self.index += 1;
@@ -145,7 +263,7 @@ impl Column {
 
     pub fn as_values(&self) -> Vec<&CellValue> {
         self.indexes
-            .iter()
+            .par_iter()
             .map(|&idx| match idx {
                 i if i < 0 => &CellValue::Null,
                 i => self.symbols.get(i as usize).unwrap(),
@@ -155,7 +273,7 @@ impl Column {
 
     pub fn into_values(self) -> Vec<CellValue> {
         self.indexes
-            .into_iter()
+            .into_par_iter()
             .map(|idx| match idx {
                 i if i < 0 => CellValue::Null,
                 i => self.symbols.get(i as usize).unwrap().clone(),
@@ -174,7 +292,7 @@ impl Column {
 
     pub fn indexes_to_values(&self, row_indexes: &[usize]) -> Vec<&CellValue> {
         row_indexes
-            .iter()
+            .par_iter()
             .map(|&idx| match self.indexes.get(idx) {
                 Some(&i) if i < 0 => &CellValue::Null,
                 Some(&i) => self.symbols.get(i as usize).unwrap(),
@@ -187,14 +305,14 @@ impl Column {
         let cell_value = value.into();
         let rows: Vec<_> = self
             .symbols
-            .iter()
+            .par_iter()
             .enumerate()
             .filter(|(_, elem)| **elem == cell_value)
             .map(|(symbol_idx, _)| symbol_idx as isize)
             .collect();
 
         self.indexes
-            .iter()
+            .par_iter()
             .enumerate()
             .filter(|(_, symbol_idx)| rows.contains(symbol_idx))
             .map(|(idx, _)| idx)
@@ -282,6 +400,34 @@ impl CellValue {
 mod tests {
 
     use super::*;
+
+    #[test]
+    fn test_parallel_colum_iter() {
+        let columns = vec![
+            Column {
+                header: "C1".into(),
+                symbols: { (1..=12).map(|i| CellValue::Int(i)).collect() },
+                indexes: vec![0, 1, 2, 3, 4, 5, 6, 6, 8, 9, 10, 11],
+            },
+            Column {
+                header: "C2".into(),
+                symbols: { (1..=12).map(|i| CellValue::Float(i as f64)).collect() },
+                indexes: vec![0, 1, 2, 3, 4, 5, 6, 6, 8, 9, 10, 11],
+            },
+            Column {
+                header: "C3".into(),
+                symbols: { (1..=12).map(|i| CellValue::Text(format!("{i}"))).collect() },
+                indexes: vec![0, 1, 2, 3, 4, 5, 6, 6, 8, 9, 10, 11],
+            },
+        ];
+        let iter = ColumnIter {
+            columns: &columns,
+            current_index: 0,
+        };
+        iter.into_par_iter().for_each(|col| {
+            println!("{}", col.header);
+        })
+    }
 
     #[test]
     fn test_row_indexes_for_string() {
