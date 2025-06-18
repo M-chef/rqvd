@@ -20,10 +20,10 @@ pub(crate) fn read_qvd(file_name: impl AsRef<Path>) -> Result<Vec<Column>, QvdEr
     let file = File::open(&file_name)?;
     let mut reader = BufReader::new(file);
     let xml: String = get_xml_data(&mut reader)?;
-    let qvd_structure: QvdTableHeader = from_str(&xml).unwrap();
+    let qvd_structure: QvdTableHeader = from_str(&xml)?;
 
     let mut buf = Vec::new();
-    reader.read_to_end(&mut buf).unwrap();
+    reader.read_to_end(&mut buf)?;
     let (symbol_map, row_section) = buf.split_at(qvd_structure.offset);
     let record_byte_size = qvd_structure.record_byte_size;
 
@@ -46,14 +46,12 @@ pub(crate) fn read_qvd(file_name: impl AsRef<Path>) -> Result<Vec<Column>, QvdEr
     Ok(columns)
 }
 
-fn get_xml_data(reader: &mut BufReader<File>) -> Result<String, io::Error> {
+fn get_xml_data(reader: &mut BufReader<File>) -> Result<String, QvdError> {
     let mut buffer = Vec::new();
     // There is a line break, carriage return and a null terminator between the XMl and data
     // Find the null terminator
-    reader
-        .read_until(0, &mut buffer)
-        .expect("Failed to read file");
-    let xml_string = String::from_utf8(buffer).expect("xml section contains invalid UTF-8 chars");
+    reader.read_until(0, &mut buffer)?;
+    let xml_string = String::from_utf8(buffer)?;
     Ok(xml_string)
 }
 

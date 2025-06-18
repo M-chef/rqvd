@@ -1,4 +1,4 @@
-use std::{fmt::Display, io, num::ParseIntError, str::Utf8Error};
+use std::{fmt::Display, io, num::ParseIntError, str::Utf8Error, string::FromUtf8Error};
 
 #[derive(Debug)]
 pub enum QvdErrorKind {
@@ -39,10 +39,28 @@ impl From<Utf8Error> for QvdError {
     }
 }
 
+impl From<FromUtf8Error> for QvdError {
+    fn from(value: FromUtf8Error) -> Self {
+        QvdError {
+            kind: QvdErrorKind::Utf8Error,
+            message: value.to_string(),
+        }
+    }
+}
+
 impl From<ParseIntError> for QvdError {
     fn from(value: ParseIntError) -> Self {
         QvdError {
             kind: QvdErrorKind::ParseError,
+            message: value.to_string(),
+        }
+    }
+}
+
+impl From<quick_xml::DeError> for QvdError {
+    fn from(value: quick_xml::DeError) -> Self {
+        QvdError {
+            kind: QvdErrorKind::ReadFile,
             message: value.to_string(),
         }
     }
